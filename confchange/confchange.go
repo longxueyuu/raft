@@ -137,6 +137,7 @@ func (c Changer) Simple(ccs ...pb.ConfChangeSingle) (tracker.Config, tracker.Pro
 	if err := c.apply(&cfg, prs, ccs...); err != nil {
 		return c.err(err)
 	}
+	// mark: confChange: Simple check if more than 1 node changed
 	if n := symdiff(incoming(c.Tracker.Voters), incoming(cfg.Voters)); n > 1 {
 		return tracker.Config{}, nil, errors.New("more than one voter changed without entering joint config")
 	}
@@ -213,6 +214,7 @@ func (c Changer) makeLearner(cfg *tracker.Config, prs tracker.ProgressMap, id ui
 	// Remove any existing voter in the incoming config...
 	c.remove(cfg, prs, id)
 	// ... but save the Progress.
+	// mark: confChange 在这里只需要从cfg的voter里移除id，remove作为一个common函数，把prs的pr也删除了，所以需要补回来
 	prs[id] = pr
 	// Use LearnersNext if we can't add the learner to Learners directly, i.e.
 	// if the peer is still tracked as a voter in the outgoing config. It will

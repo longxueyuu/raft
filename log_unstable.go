@@ -32,10 +32,12 @@ import pb "go.etcd.io/raft/v3/raftpb"
 // might need to truncate the log before persisting unstable.entries.
 type unstable struct {
 	// the incoming unstable snapshot, if any.
+	// mark: snap: set when received snap req from leader, see r.handleSnapshot
 	snapshot *pb.Snapshot
 	// all entries that have not yet been written to storage.
 	entries []pb.Entry
 	// entries[i] has raft log position i+offset.
+	// mark: log: entries[0].index == offset
 	offset uint64
 
 	// if true, snapshot is being written to storage.
@@ -131,6 +133,7 @@ func (u *unstable) acceptInProgress() {
 // The method should only be called when the caller can attest that the entries
 // can not be overwritten by an in-progress log append. See the related comment
 // in newStorageAppendRespMsg.
+// mark: stable
 func (u *unstable) stableTo(i, t uint64) {
 	gt, ok := u.maybeTerm(i)
 	if !ok {
@@ -200,6 +203,7 @@ func (u *unstable) truncateAndAppend(ents []pb.Entry) {
 		// fromIndex is the next index in the u.entries, so append directly.
 		u.entries = append(u.entries, ents...)
 	case fromIndex <= u.offset:
+		// mark: append: storage的log是stabled(persisted)语义，不是committed的语义，所以这里隐含storage里的log将会/需要被truncate
 		u.logger.Infof("replace the unstable entries from index %d", fromIndex)
 		// The log is being truncated to before our current offset
 		// portion, so set the offset and replace the entries.

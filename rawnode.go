@@ -138,6 +138,7 @@ func (rn *RawNode) Ready() Ready {
 
 // readyWithoutAccept returns a Ready. This is a read-only operation, i.e. there
 // is no obligation that the Ready must be handled.
+// mark: ready: readyWithoutAccept
 func (rn *RawNode) readyWithoutAccept() Ready {
 	r := rn.raft
 

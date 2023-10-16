@@ -60,6 +60,8 @@ func (rn *RawNode) Bootstrap(peers []Peer) error {
 	}
 	rn.raft.raftLog.append(ents...)
 
+	// mark confChange: apply them means invoke applyConfChange method
+
 	// Now apply them, mainly so that the application can call Campaign
 	// immediately after StartNode in tests. Note that these nodes will
 	// be added to raft twice: here and when the application's Ready

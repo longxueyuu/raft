@@ -577,11 +577,13 @@ func (r *raft) send(m pb.Message) {
 		// because the safety of such behavior has not been formally verified,
 		// we err on the side of safety and omit a `&& !m.Reject` condition
 		// above.
+		// mark: leader/follower to send msgs
 		r.msgsAfterAppend = append(r.msgsAfterAppend, m)
 	} else {
 		if m.To == r.id {
 			r.logger.Panicf("message should not be self-addressed when sending %s", m.Type)
 		}
+		// mark: leader/follower to send msgs
 		r.msgs = append(r.msgs, m)
 	}
 }
@@ -627,7 +629,7 @@ func (r *raft) maybeSendAppend(to uint64, sendIfEmpty bool) bool {
 			r.logger.Debugf("ignore sending snapshot to %x since it is not recently active", to)
 			return false
 		}
-
+		// mark: snap: become leader/receives 'MsgProp' then bcastAppend -> sendAppend -> maybeSendAppend
 		snapshot, err := r.raftLog.snapshot()
 		if err != nil {
 			if err == ErrSnapshotTemporarilyUnavailable {
@@ -654,6 +656,7 @@ func (r *raft) maybeSendAppend(to uint64, sendIfEmpty bool) bool {
 		r.logger.Panicf("%x: %v", r.id, err)
 	}
 	// NB: pr has been updated, but we make sure to only use its old values below.
+	// mark: props inflights for follower
 	r.send(pb.Message{
 		To:      to,
 		Type:    pb.MsgApp,
@@ -686,6 +689,7 @@ func (r *raft) sendHeartbeat(to uint64, ctx []byte) {
 
 // bcastAppend sends RPC, with entries to all peers that are not up-to-date
 // according to the progress recorded in r.prs.
+// mark: bcastAppend
 func (r *raft) bcastAppend() {
 	r.prs.Visit(func(id uint64, _ *tracker.Progress) {
 		if id == r.id {
@@ -948,6 +952,7 @@ func (r *raft) hup(t CampaignType) {
 		r.logger.Warningf("%x is unpromotable and can not campaign", r.id)
 		return
 	}
+	// mark: confChange: 没有更新到最新提交的conf，禁止发起leader选举，避免形成多个集群
 	if r.hasUnappliedConfChanges() {
 		r.logger.Warningf("%x cannot campaign at term %d since there are still pending configuration changes to apply", r.id, r.Term)
 		return
@@ -1024,6 +1029,7 @@ func (r *raft) campaign(t CampaignType) {
 			// send a MsgVote to itself). This response message will be added to
 			// msgsAfterAppend and delivered back to this node after the vote
 			// has been written to stable storage.
+			// mark: PreVote/Vote: vote itself
 			r.send(pb.Message{To: id, Term: term, Type: voteRespMsgType(voteMsg)})
 			continue
 		}
@@ -1048,12 +1054,14 @@ func (r *raft) poll(id uint64, t pb.MessageType, v bool) (granted int, rejected 
 	return r.prs.TallyVotes()
 }
 
+// mark: step: Step
 func (r *raft) Step(m pb.Message) error {
 	// Handle the message term, which may result in our stepping down to a follower.
 	switch {
 	case m.Term == 0:
 		// local message
 	case m.Term > r.Term:
+		// mark: PreVote with HighTerm
 		if m.Type == pb.MsgVote || m.Type == pb.MsgPreVote {
 			force := bytes.Equal(m.Context, []byte(campaignTransfer))
 			inLease := r.checkQuorum && r.lead != None && r.electionElapsed < r.electionTimeout
@@ -1085,7 +1093,17 @@ func (r *raft) Step(m pb.Message) error {
 		}
 
 	case m.Term < r.Term:
+		// mark: PreVote with LowTerm
 		if (r.checkQuorum || r.preVote) && (m.Type == pb.MsgHeartbeat || m.Type == pb.MsgApp) {
+			// mark: 当checkQuorum为false时是旧Term的leader不会进入（if !force && inLease {）这个分支，而会进default分支，使leader下线，重新选举
+			// mark: 而checkQuorum为true的话，leader会进入（if !force && inLease {）这个分支, 压制因网络分区导致term变大的follower重新进入集群；
+			// mark: 当preVote为false时，不发送prevote，leader会进入(case m.Term > r.Term:)分支，使leader下线，重新选举
+			// mark: 而preVote为true时, leader会进入(case m.Type == pb.MsgPreVote:)分支，压制日志落后但term超前的follower重新进入集群；
+
+			// mark: 当leader重新联系上分区的follower节点时，在这里日志落后但term超前的follower，带着当前节点的超前term回复appResp消息，
+			// 是为了让leader下线并更新最新term，重新选举，从而使该节点在上述两种情况下重新加入集群；
+			// 所以这里的preVote实际没能阻止集群的重新选举，只是阻止了集群移除节点的情况, 因为移除的节点不会再收到MsgHeartbeat和MsgApp消息
+
 			// We have received messages from a leader at a lower term. It is possible
 			// that these messages were simply delayed in the network, but this could
 			// also mean that this node has advanced its term number during a network
@@ -1109,13 +1127,28 @@ func (r *raft) Step(m pb.Message) error {
 			// fresh election. This can be prevented with Pre-Vote phase.
 			r.send(pb.Message{To: m.From, Type: pb.MsgAppResp})
 		} else if m.Type == pb.MsgPreVote {
+			// mark: PreVote: 参考测试用例 TestPreVoteMigrationCanCompleteElection
+			// mark:
+			// n1 is leader with term 2
+			// n2 is follower with term 2
+			// n3 is pre-candidate with term 4, and less log
+
+			// 1 n1 挂掉
+			// 2 n3 -> n2 prevote & n2 -> n3 prevote
+			// 3 a) 如果这里n3没有reject n2的prevote，而是忽略，n2的preVote的poll result将是
+			// pending, 进而选举超时继续下一轮选举；
+			// 对于n2，由于n3 log不够新，n2会reject n3的prevote，n3的preVote的poll result将是
+			// lost, 进而选举超时继续下一轮选举；如此循环，导致deadlock
+			//   b) 如果这里n3 reject n2的prevote, 因为n3 term 比n2大，n2将term更新为n3的term，
+			// n2的preVote的poll result将是lost, 进而选举超时继续下一轮选举，获得n3赞成
+
 			// Before Pre-Vote enable, there may have candidate with higher term,
 			// but less log. After update to Pre-Vote, the cluster may deadlock if
 			// we drop messages with a lower term.
 			r.logger.Infof("%x [logterm: %d, index: %d, vote: %x] rejected %s from %x [logterm: %d, index: %d] at term %d",
 				r.id, r.raftLog.lastTerm(), r.raftLog.lastIndex(), r.Vote, m.Type, m.From, m.LogTerm, m.Index, r.Term)
 			r.send(pb.Message{To: m.From, Term: r.Term, Type: pb.MsgPreVoteResp, Reject: true})
-		} else if m.Type == pb.MsgStorageAppendResp {
+		} else if m.Type == pb.MsgStorageAppendResp { // mark: async: MsgStorageAppendResp
 			if m.Index != 0 {
 				// Don't consider the appended log entries to be stable because
 				// they may have been overwritten in the unstable log during a
@@ -1145,7 +1178,7 @@ func (r *raft) Step(m pb.Message) error {
 		} else {
 			r.hup(campaignElection)
 		}
-
+	// mark: async: MsgStorageAppendResp
 	case pb.MsgStorageAppendResp:
 		if m.Index != 0 {
 			r.raftLog.stableTo(m.Index, m.LogTerm)
@@ -1256,6 +1289,7 @@ func stepLeader(r *raft, m pb.Message) error {
 			return ErrProposalDropped
 		}
 
+		// mark: confChange proposed Entries
 		for i := range m.Entries {
 			e := &m.Entries[i]
 			var cc pb.ConfChangeI
@@ -1295,6 +1329,7 @@ func stepLeader(r *raft, m pb.Message) error {
 			}
 		}
 
+		// mark: append propose msgs(as entries) to unstable entries and then consume from Ready() and then save to persist storage
 		if !r.appendEntry(m.Entries...) {
 			return ErrProposalDropped
 		}
@@ -1455,6 +1490,7 @@ func stepLeader(r *raft, m pb.Message) error {
 				//    7, the rejection points it at the end of the follower's log
 				//    which is at a higher log term than the actually committed
 				//    log.
+				// mark: append: stepLeader: findConflictByTerm
 				nextProbeIdx, _ = r.raftLog.findConflictByTerm(m.RejectHint, m.LogTerm)
 			}
 			if pr.MaybeDecrTo(m.Index, nextProbeIdx) {
@@ -1586,6 +1622,7 @@ func stepLeader(r *raft, m pb.Message) error {
 		}
 		r.logger.Debugf("%x failed to send message to %x because it is unreachable [%s]", r.id, m.From, pr)
 	case pb.MsgTransferLeader:
+		// mark: leader transfer
 		if pr.IsLearner {
 			r.logger.Debugf("%x is learner. Ignored transferring leadership", r.id)
 			return nil
@@ -1712,6 +1749,7 @@ func stepFollower(r *raft, m pb.Message) error {
 		// Leadership transfers never use pre-vote even if r.preVote is true; we
 		// know we are not recovering from a partition so there is no need for the
 		// extra round trip.
+		// mark: process msgTimeoutNow
 		r.hup(campaignTransfer)
 	case pb.MsgReadIndex:
 		if r.lead == None {
@@ -1775,6 +1813,7 @@ func (r *raft) handleHeartbeat(m pb.Message) {
 	r.send(pb.Message{To: m.From, Type: pb.MsgHeartbeatResp, Context: m.Context})
 }
 
+// mark: snap handleSnapshot
 func (r *raft) handleSnapshot(m pb.Message) {
 	// MsgSnap messages should always carry a non-nil Snapshot, but err on the
 	// side of safety and treat a nil Snapshot as a zero-valued Snapshot.
@@ -1892,6 +1931,7 @@ func (r *raft) applyConfChange(cc pb.ConfChangeV2) pb.ConfState {
 			Tracker:   r.prs,
 			LastIndex: r.raftLog.lastIndex(),
 		}
+		// mark: confChange LeaveJoint & EnterJoint
 		if cc.LeaveJoint() {
 			return changer.LeaveJoint()
 		} else if autoLeave, ok := cc.EnterJoint(); ok {
@@ -1943,6 +1983,7 @@ func (r *raft) switchToConfig(cfg tracker.Config, prs tracker.ProgressMap) pb.Co
 
 	// The remaining steps only make sense if this node is the leader and there
 	// are other nodes.
+	// mark: confChange: 节点首次启动(see newRaft func)会命中`len(cs.Voters) == 0`
 	if r.state != StateLeader || len(cs.Voters) == 0 {
 		return cs
 	}

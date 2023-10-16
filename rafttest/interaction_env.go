@@ -82,6 +82,7 @@ func (env *InteractionEnv) withIndent(f func()) {
 // Storage is the interface used by InteractionEnv. It is comprised of raft's
 // Storage interface plus access to operations that maintain the log and drive
 // the Ready handling loop.
+// mark: storage: extend
 type Storage interface {
 	raft.Storage
 	SetHardState(state pb.HardState) error

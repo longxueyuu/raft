@@ -17,6 +17,7 @@ package raft
 import (
 	"bytes"
 	"fmt"
+	"log"
 	"math"
 	"math/rand"
 	"reflect"
@@ -5057,4 +5058,79 @@ func newTestRawNode(id uint64, election, heartbeat int, storage Storage) *RawNod
 		panic(err)
 	}
 	return rn
+}
+
+// mark: test
+func TestConfChangeApplySplitLeader(t *testing.T) {
+	s1 := makeInitMs()
+	rn1 := newTestRawNode(1, 2, 1, s1)
+
+	for {
+		rn1.Tick()
+		if rn1.raft.state == StateCandidate {
+			break
+		}
+	}
+
+	log.Printf("s=%v", rn1)
+
+	//s2 := makeInitMs()
+
+}
+
+func makeInitMs() *MemoryStorage {
+	s := newTestMemoryStorage()
+	s.SetHardState(pb.HardState{
+		Term:   1,
+		Vote:   1,
+		Commit: 3,
+	})
+	s.ApplySnapshot(pb.Snapshot{
+		Data: []byte{1, 1, 0, 0},
+		Metadata: pb.SnapshotMetadata{
+			ConfState: pb.ConfState{
+				Voters: []uint64{1},
+			},
+			Index: 2,
+			Term:  1,
+		},
+	})
+	s.Append([]pb.Entry{
+		{
+			Term:  1,
+			Index: 1,
+			Type:  pb.EntryConfChange,
+			Data:  makeConfChangeData(pb.ConfChangeAddNode, 1),
+		},
+		// mark: snap
+		{
+			Term:  1,
+			Index: 2,
+			Type:  pb.EntryNormal,
+			Data:  nil,
+		},
+		{
+			Term:  1,
+			Index: 3,
+			Type:  pb.EntryConfChange,
+			Data:  makeConfChangeData(pb.ConfChangeAddNode, 2),
+		},
+		{
+			Term:  1,
+			Index: 4,
+			Type:  pb.EntryConfChange,
+			Data:  makeConfChangeData(pb.ConfChangeAddNode, 3),
+		},
+	})
+
+	return s
+}
+
+func makeConfChangeData(t pb.ConfChangeType, nodeID uint64) []byte {
+	change := pb.ConfChange{
+		Type:   t,
+		NodeID: nodeID,
+	}
+	bs, _ := change.Marshal()
+	return bs
 }

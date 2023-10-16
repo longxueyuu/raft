@@ -68,6 +68,7 @@ func isMsgInArray(msgt pb.MessageType, arr []bool) bool {
 	return i < len(arr) && arr[i]
 }
 
+// mark: msgType: local msg type
 func IsLocalMsg(msgt pb.MessageType) bool {
 	return isMsgInArray(msgt, isLocalMsg[:])
 }

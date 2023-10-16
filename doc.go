@@ -314,6 +314,7 @@ stale log entries:
 	method. It is stored with sender's ID and later forwarded to leader by
 	rafthttp package.
 
+	// mark: MsgApp doc: means AppendRpc
 	'MsgApp' contains log entries to replicate. A leader calls bcastAppend,
 	which calls sendAppend, which sends soon-to-be-replicated logs in 'MsgApp'
 	type. When 'MsgApp' is passed to candidate's Step method, candidate reverts

@@ -168,6 +168,8 @@ type Node interface {
 	//
 	// The application should generally call Advance after it applies the entries in last Ready.
 	//
+	// mark: advance: optimization nb: I think this requires application handling apply correctly
+	//
 	// However, as an optimization, the application may call Advance while it is applying the
 	// commands. For example. when the last Ready contains a snapshot, the application might take
 	// a long time to apply the snapshot data. To continue receiving Ready without blocking raft
@@ -295,16 +297,19 @@ type msgWithResult struct {
 
 // node is the canonical implementation of the Node interface
 type node struct {
-	propc      chan msgWithResult
+	// mark: node from client/other node: to readyc
+	propc chan msgWithResult
+	// mark: mainly from rpc: msg from other node
 	recvc      chan pb.Message
 	confc      chan pb.ConfChangeV2
 	confstatec chan pb.ConfState
-	readyc     chan Ready
-	advancec   chan struct{}
-	tickc      chan struct{}
-	done       chan struct{}
-	stop       chan struct{}
-	status     chan chan Status
+	// mark: node to rpc: msg to other node
+	readyc   chan Ready
+	advancec chan struct{}
+	tickc    chan struct{}
+	done     chan struct{}
+	stop     chan struct{}
+	status   chan chan Status
 
 	rn *RawNode
 }
@@ -349,7 +354,7 @@ func (n *node) run() {
 	r := n.rn.raft
 
 	lead := None
-
+	// mark: node run
 	for {
 		if advancec == nil && n.rn.HasReady() {
 			// Populate a Ready. Note that this Ready is not guaranteed to
@@ -383,21 +388,27 @@ func (n *node) run() {
 		// TODO: maybe buffer the config propose if there exists one (the way
 		// described in raft dissertation)
 		// Currently it is dropped in Step silently.
+		// mark: propc consume
 		case pm := <-propc:
 			m := pm.m
 			m.From = r.id
 			err := r.Step(m)
+			// mark: pm.result send/close
 			if pm.result != nil {
 				pm.result <- err
 				close(pm.result)
 			}
 		case m := <-n.recvc:
+			// mark: local: LocalMsg/Response
+			// mark: recvc consume
 			if IsResponseMsg(m.Type) && !IsLocalMsgTarget(m.From) && r.prs.Progress[m.From] == nil {
 				// Filter out response message from unknown From.
 				break
 			}
 			r.Step(m)
 		case cc := <-n.confc:
+			// mark: confChange consume：okBefore为false的情况：节点首次启动后加入已存在的集群，
+			// 但还没有同步到加入集群的成员变更日志，此时progress里没有自己
 			_, okBefore := r.prs.Progress[r.id]
 			cs := r.applyConfChange(cc)
 			// If the node was removed, block incoming proposals. Note that we
@@ -431,8 +442,10 @@ func (n *node) run() {
 			case <-n.done:
 			}
 		case <-n.tickc:
+			// mark: tick raft level
 			n.rn.Tick()
 		case readyc <- rd:
+			// mark: readyc: prop msgs to be sent to readyc and consumed and to send to follower
 			n.rn.acceptReady(rd)
 			if !n.rn.asyncStorageWrites {
 				advancec = n.advancec
@@ -441,6 +454,7 @@ func (n *node) run() {
 			}
 			readyc = nil
 		case <-advancec:
+			// mark: advance consume
 			n.rn.Advance(rd)
 			rd = Ready{}
 			advancec = nil
@@ -469,6 +483,12 @@ func (n *node) Campaign(ctx context.Context) error { return n.step(ctx, pb.Messa
 func (n *node) Propose(ctx context.Context, data []byte) error {
 	return n.stepWait(ctx, pb.Message{Type: pb.MsgProp, Entries: []pb.Entry{{Data: data}}})
 }
+
+// mark: node:
+// Step | Campaign | ReadIndex -> step	----- false --->stepWithWaitOption
+// 									   					     /|\
+// 															  |
+// 						Propose -> stepWait ---- true --------
 
 func (n *node) Step(ctx context.Context, m pb.Message) error {
 	// Ignore unexpected local messages receiving over network.
@@ -505,6 +525,7 @@ func (n *node) stepWait(ctx context.Context, m pb.Message) error {
 
 // Step advances the state machine using msgs. The ctx.Err() will be returned,
 // if any.
+// mark: propose/receive entryWithWait
 func (n *node) stepWithWaitOption(ctx context.Context, m pb.Message, wait bool) error {
 	if m.Type != pb.MsgProp {
 		select {

@@ -24,6 +24,7 @@ import (
 )
 
 func TestInteraction(t *testing.T) {
+	// mark: test: to learn: run `go test go.etcd.io/etcd/raft/v3 -rewrite`  -rewrite use by datadriven
 	// NB: if this test fails, run `go test ./raft -rewrite` and inspect the
 	// diff. Only commit the changes if you understand what caused them and if
 	// they are desired.

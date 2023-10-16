@@ -132,6 +132,7 @@ func (l *raftLog) append(ents ...pb.Entry) uint64 {
 	if len(ents) == 0 {
 		return l.lastIndex()
 	}
+	// mark: append check: new unstable entries should have not been committed
 	if after := ents[0].Index - 1; after < l.committed {
 		l.logger.Panicf("after(%d) is out of range [committed(%d)]", after, l.committed)
 	}
@@ -357,6 +358,8 @@ func (l *raftLog) acceptApplying(i uint64, size entryEncodingSize, allowUnstable
 	//    not equal, then the returned entries slice must have been truncated to
 	//    adhere to the memory limit.
 	l.applyingEntsPaused = l.applyingEntsSize >= l.maxApplyingEntsSize ||
+		// mark: apply: raftLog.nextCommittedEnts返回的entry不包含最大的committed的index，
+		// 说明在nextCommittedEnts里已经被限流了
 		i < l.maxAppliableIndex(allowUnstable)
 }
 
@@ -455,6 +458,7 @@ func (l *raftLog) maybeCommit(maxIndex, term uint64) bool {
 	return false
 }
 
+// mark: snap restore
 func (l *raftLog) restore(s pb.Snapshot) {
 	l.logger.Infof("log [%s] starts to restore snapshot [index: %d, term: %d]", l, s.Metadata.Index, s.Metadata.Term)
 	l.committed = s.Metadata.Index
